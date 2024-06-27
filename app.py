@@ -1,18 +1,13 @@
 from flask import Flask, request, jsonify
 import cv2
+import mediapipe as mp
 import numpy as np
-import dlib
 import os
-from imutils import face_utils
 import pandas as pd
-import sys
-import logging
 
 app = Flask(__name__)
 
-# Load dlib's pre-trained face detector and shape predictor
-detector = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor('shape_predictor_68_face_landmarks.dat')
+mp_face_mesh = mp.solutions.face_mesh
 
 def create_line_iterator(P1, P2, img):
     imageH = img.shape[0]
@@ -61,88 +56,63 @@ def create_line_iterator(P1, P2, img):
     itbuffer[:, 2] = img[itbuffer[:, 1].astype(np.uint), itbuffer[:, 0].astype(np.uint)]
     return itbuffer
 
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 @app.route('/upload', methods=['POST'])
 def upload_video():
-    if 'video' not in request.files:
-        logger.error("No video file provided")
-        return jsonify({"error": "No video file provided"}), 400
-    
     file = request.files['video']
-    if file.filename == '':
-        logger.error("No selected file")
-        return jsonify({"error": "No selected file"}), 400
-    
     filepath = os.path.join('uploads', file.filename)
     file.save(filepath)
-    
-    try:
-        # Process the video
-        cap = cv2.VideoCapture(filepath)
-        frame_counter = 0
-        right_eye_progression_x = []
-        right_eye_progression_y = []
-        left_eye_progression_x = []
-        left_eye_progression_y = []
 
+    # Process the video
+    cap = cv2.VideoCapture(filepath)
+    frame_counter = 0
+    right_eye_progression_x = []
+    right_eye_progression_y = []
+    left_eye_progression_x = []
+    left_eye_progression_y = []
+
+    with mp_face_mesh.FaceMesh(static_image_mode=False, max_num_faces=1, min_detection_confidence=0.5) as face_mesh:
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            rects = detector(gray, 0)
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = face_mesh.process(rgb_frame)
 
-            for rect in rects:
-                shape = predictor(gray, rect)
-                shape = face_utils.shape_to_np(shape)
+            if results.multi_face_landmarks:
+                for face_landmarks in results.multi_face_landmarks:
+                    frame_counter += 1
 
-                frame_counter += 1
-                ReLcX = ReLcY = ReRcX = ReRcY = LeLcX = LeLcY = LeRcX = LeRcY = 0
+                    # Get eye landmarks
+                    ReLcX, ReLcY = int(face_landmarks.landmark[133].x * frame.shape[1]), int(face_landmarks.landmark[133].y * frame.shape[0])
+                    ReRcX, ReRcY = int(face_landmarks.landmark[33].x * frame.shape[1]), int(face_landmarks.landmark[33].y * frame.shape[0])
+                    LeLcX, LeLcY = int(face_landmarks.landmark[362].x * frame.shape[1]), int(face_landmarks.landmark[362].y * frame.shape[0])
+                    LeRcX, LeRcY = int(face_landmarks.landmark[263].x * frame.shape[1]), int(face_landmarks.landmark[263].y * frame.shape[0])
 
-                for i, (x, y) in enumerate(shape):
-                    if i == 42:  # Right eye left corner
-                        ReLcX, ReLcY = x, y
-                    elif i == 45:  # Right eye right corner
-                        ReRcX, ReRcY = x, y
-                    elif i == 36:  # Left eye left corner
-                        LeLcX, LeLcY = x, y
-                    elif i == 39:  # Left eye right corner
-                        LeRcX, LeRcY = x, y
+                    right_eye_center_x = (ReLcX + ReRcX) // 2
+                    right_eye_center_y = (ReLcY + ReRcY) // 2
+                    left_eye_center_x = (LeLcX + LeRcX) // 2
+                    left_eye_center_y = (LeLcY + LeRcY) // 2
 
-                right_eye_center_x = (ReLcX + ReRcX) // 2
-                right_eye_center_y = (ReLcY + ReRcY) // 2
-                left_eye_center_x = (LeLcX + LeRcX) // 2
-                left_eye_center_y = (LeLcY + LeRcY) // 2
+                    right_eye_progression_x.append(right_eye_center_x)
+                    right_eye_progression_y.append(right_eye_center_y)
+                    left_eye_progression_x.append(left_eye_center_x)
+                    left_eye_progression_y.append(left_eye_center_y)
 
-                right_eye_progression_x.append(right_eye_center_x)
-                right_eye_progression_y.append(right_eye_center_y)
-                left_eye_progression_x.append(left_eye_center_x)
-                left_eye_progression_y.append(left_eye_center_y)
+    cap.release()
+    os.remove(filepath)
 
-        cap.release()
-        os.remove(filepath)
-
-        fixation_results = analyze_fixations(right_eye_progression_x, right_eye_progression_y, left_eye_progression_x, left_eye_progression_y)
-        logger.info("Video processed successfully")
-        return jsonify(fixation_results)
-
-    except Exception as e:
-        logger.error("Error processing video: %s", str(e))
-        return jsonify({"error": str(e)}), 500
-
-
-
+    # Analyze fixation frequency and duration
+    fixation_results = analyze_fixations(right_eye_progression_x, right_eye_progression_y, left_eye_progression_x, left_eye_progression_y)
     
+    return jsonify(fixation_results)
 
 def analyze_fixations(rx, ry, lx, ly):
+    # Placeholder logic for analysis
     fixation_frequency = len(rx)
     average_fixation_duration = sum(rx) / len(rx) if rx else 0
     
     # Implement actual logic based on research paper
-    threshold = 500  # Example threshold, adjust based on your research
+    threshold = 5  # Example threshold, replace with actual logic
     prediction = "likely dyslexic" if average_fixation_duration > threshold else "not dyslexic"
 
     return {
@@ -150,7 +120,6 @@ def analyze_fixations(rx, ry, lx, ly):
         "average_fixation_duration": average_fixation_duration,
         "prediction": prediction
     }
-
 
 if __name__ == '__main__':
     app.run(debug=True)
